@@ -1,3 +1,32 @@
+/*
+  ESP32 MQTT Display System
+
+  This Arduino code is designed for an ESP32 microcontroller to create a simple MQTT-based display system.
+  The system consists of two tasks(2 Cores):
+  
+  1. MqttTask: Responsible for connecting to a WiFi network and MQTT broker. It subscribes to all topics ('#') and 
+     handles incoming messages. It updates a message queue with received data.
+
+  2. DisplayTask: Manages the LCD display and continuously monitors the message queue for new data. When new data
+     arrives, it clears the LCD and displays the received topic and payload.
+
+  The code utilizes FreeRTOS for multitasking. The MQTT connection details, WiFi credentials, and other configurations
+  are defined as constants at the beginning of the file. Additionally, there are defined structures and tasks for MQTT
+  communication, display handling, and synchronization using semaphores.
+
+  Libraries used:
+  - WiFi.h: Handles WiFi connection.
+  - PubSubClient.h: Implements MQTT protocol.
+  - LiquidCrystal_I2C.h: Controls I2C-based LCD.
+
+  Note: The code assumes certain configurations like the MQTT broker's address, WiFi credentials, LCD I2C address, and pin mappings.
+  Make sure to modify these values according to your setup.
+
+  Author: THITINUN
+  Date: 20240206
+*/
+
+
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -18,12 +47,12 @@
 #define LED_PIN 23
 #define LED_BUILTIN 2
 
-#define I2C_ADDRESS 0x3F
+#define I2C_ADDRESS 0x3F //already run an I2C scanner sketch
 
 // Define a message structure
 typedef struct {
   int data;
-  char topic[100];// better to use array of char instead of String (*trust me)
+  char topic[100];  // better to use array of char instead of String (*trust me)
   char payload[100];
   // Add other fields as needed
 } MyMessage;
@@ -32,9 +61,9 @@ typedef struct {
 #define QUEUE_LENGTH 10
 #define ITEM_SIZE sizeof(MyMessage)
 QueueHandle_t xQueueCore0ToCore1;
-// SemaphoreHandle_t xSerialMutex;
 TaskHandle_t Task1 = NULL;
 TaskHandle_t Task2 = NULL;
+SemaphoreHandle_t serialMutex;
 
 WiFiClient client;
 PubSubClient mqtt(client);
@@ -44,8 +73,8 @@ int lcdColumns = 16;
 int lcdRows = 2;
 
 // set LCD address, number of columns and rows
-// if you don't know your display address, run an I2C scanner sketch
 LiquidCrystal_I2C lcd(I2C_ADDRESS, lcdColumns, lcdRows);
+
 
 // Function
 void callback(char *topic, byte *payload, unsigned int length) {
@@ -54,9 +83,10 @@ void callback(char *topic, byte *payload, unsigned int length) {
   payload[length] = '\0';
 
   String topic_str = topic, payload_str = (char *)payload;
-  // xSemaphoreTake(xSerialMutex, portMAX_DELAY);
-  Serial.println("[" + topic_str + "]: " + payload_str);
-  // xSemaphoreGive(xSerialMutex);
+  if (xSemaphoreTake(serialMutex, portMAX_DELAY)) {
+    Serial.println("[" + topic_str + "]: " + payload_str);
+    xSemaphoreGive(serialMutex);
+  }
 
   messageToSend.data = random(100);
   strcpy(messageToSend.topic, topic_str.c_str());
@@ -71,7 +101,8 @@ void DisplayTask(void *pvParameters) {
   // initialize LCD
   lcd.init();
   // turn on LCD backlight
-  lcd.backlight();
+  // lcd.backlight();
+  lcd.noBacklight();
 
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -85,11 +116,11 @@ void DisplayTask(void *pvParameters) {
   while (1) {
     // Receive message from the queue
     if (xQueueReceive(xQueueCore0ToCore1, &receivedMessage, portMAX_DELAY)) {
-
-      // xSemaphoreTake(xSerialMutex, portMAX_DELAY);
-      Serial.print("DisplayTask received message: ");
-      Serial.println(receivedMessage.topic);
-      // xSemaphoreGive(xSerialMutex);
+      if (xSemaphoreTake(serialMutex, portMAX_DELAY)) {
+        Serial.print("DisplayTask received message: ");
+        Serial.println(receivedMessage.topic);
+        xSemaphoreGive(serialMutex);
+      }
 
       lcd.clear();
       lcd.setCursor(0, 0);
@@ -110,50 +141,38 @@ void DisplayTask(void *pvParameters) {
 void MqttTask(void *pvParameters) {
   MyMessage messageToSend;
 
-  // xSemaphoreTake(xSerialMutex, portMAX_DELAY);
   Serial.println();
   Serial.println();
   Serial.print("Connecting to ");
   Serial.println(WIFI_STA_NAME);
-  // xSemaphoreGive(xSerialMutex);
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_STA_NAME, WIFI_STA_PASS);
 
   while (WiFi.status() != WL_CONNECTED) {
     vTaskDelay(pdMS_TO_TICKS(5000));  // Delay for 5 seconds
-    // xSemaphoreTake(xSerialMutex, portMAX_DELAY);
     Serial.print(".");
-    // xSemaphoreGive(xSerialMutex);
     digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
   }
 
   digitalWrite(LED_BUILTIN, HIGH);
 
-  // xSemaphoreTake(xSerialMutex, portMAX_DELAY);
   Serial.println("");
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
-  // xSemaphoreGive(xSerialMutex);
 
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
   mqtt.setCallback(callback);
 
   while (1) {
     if (mqtt.connected() == false) {
-      // xSemaphoreTake(xSerialMutex, portMAX_DELAY);
       Serial.print("MQTT connection... ");
-      // xSemaphoreGive(xSerialMutex);
       if (mqtt.connect(MQTT_NAME)) {
-        // xSemaphoreTake(xSerialMutex, portMAX_DELAY);
         Serial.println("connected");
-        // xSemaphoreGive(xSerialMutex);
         mqtt.subscribe("#");
       } else {
-        // xSemaphoreTake(xSerialMutex, portMAX_DELAY);
         Serial.println("failed");
-        // xSemaphoreGive(xSerialMutex);
         vTaskDelay(pdMS_TO_TICKS(5000));  // Delay for 5 seconds
       }
     } else {
@@ -168,6 +187,9 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(LED_PIN, OUTPUT);
 
+  // Create a mutex for Serial
+  serialMutex = xSemaphoreCreateMutex();
+
   // Create message queue
   xQueueCore0ToCore1 = xQueueCreate(QUEUE_LENGTH, ITEM_SIZE);
 
@@ -176,9 +198,6 @@ void setup() {
   // xTaskCreate(DisplayTask, "DisplayTask", 20000, NULL, 2, NULL);
   xTaskCreatePinnedToCore(MqttTask, "MqttTask", 5000, NULL, 1, &Task1, 0);
   xTaskCreatePinnedToCore(DisplayTask, "DisplayTask", 5000, NULL, 1, &Task2, 1);
-
-  // Create a mutex for Serial
-  // xSerialMutex = xSemaphoreCreateMutex();
 
   // Start the scheduler
   vTaskStartScheduler();
