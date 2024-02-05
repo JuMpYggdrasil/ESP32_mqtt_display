@@ -2,13 +2,15 @@
   ESP32 MQTT Display System
 
   This Arduino code is designed for an ESP32 microcontroller to create a simple MQTT-based display system.
-  The system consists of two tasks(2 Cores):
+  The system consists of three tasks(2 Cores):
   
-  1. MqttTask: Responsible for connecting to a WiFi network and MQTT broker. It subscribes to all topics ('#') and 
+  1. MqttHandleTask: Responsible for connecting to a WiFi network and MQTT broker. It subscribes to all topics ('#') and 
      handles incoming messages. It updates a message queue with received data.
 
   2. DisplayTask: Manages the LCD display and continuously monitors the message queue for new data. When new data
      arrives, it clears the LCD and displays the received topic and payload.
+
+  3. MqttPublishTask: Publish MQTT every minute Use the mutex in Task 3 and other future Task, prevent Race Condition
 
   The code utilizes FreeRTOS for multitasking. The MQTT connection details, WiFi credentials, and other configurations
   are defined as constants at the beginning of the file. Additionally, there are defined structures and tasks for MQTT
@@ -63,7 +65,9 @@ typedef struct {
 QueueHandle_t xQueueCore0ToCore1;
 TaskHandle_t Task1 = NULL;
 TaskHandle_t Task2 = NULL;
+TaskHandle_t Task3 = NULL;
 SemaphoreHandle_t serialMutex;
+SemaphoreHandle_t mqttMutex;
 
 WiFiClient client;
 PubSubClient mqtt(client);
@@ -76,69 +80,8 @@ int lcdRows = 2;
 LiquidCrystal_I2C lcd(I2C_ADDRESS, lcdColumns, lcdRows);
 
 
-// Function
-void callback(char *topic, byte *payload, unsigned int length) {
-  MyMessage messageToSend;
-
-  payload[length] = '\0';
-
-  String topic_str = topic, payload_str = (char *)payload;
-  if (xSemaphoreTake(serialMutex, portMAX_DELAY)) {
-    Serial.println("[" + topic_str + "]: " + payload_str);
-    xSemaphoreGive(serialMutex);
-  }
-
-  messageToSend.data = random(100);
-  strcpy(messageToSend.topic, topic_str.c_str());
-  strcpy(messageToSend.payload, payload_str.c_str());
-  xQueueSend(xQueueCore0ToCore1, &messageToSend, portMAX_DELAY);
-}
-
-// Tasks 2
-void DisplayTask(void *pvParameters) {
-  MyMessage receivedMessage;
-
-  // initialize LCD
-  lcd.init();
-  // turn on LCD backlight
-  // lcd.backlight();
-  lcd.noBacklight();
-
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("IP address:");
-  vTaskDelay(pdMS_TO_TICKS(10));  // Delay for 5 seconds
-  lcd.setCursor(0, 1);
-  vTaskDelay(pdMS_TO_TICKS(10000));  // Delay for 5 seconds
-  lcd.print(WiFi.localIP());
-  vTaskDelay(pdMS_TO_TICKS(5000));  // Delay for 5 seconds
-
-  while (1) {
-    // Receive message from the queue
-    if (xQueueReceive(xQueueCore0ToCore1, &receivedMessage, portMAX_DELAY)) {
-      if (xSemaphoreTake(serialMutex, portMAX_DELAY)) {
-        Serial.print("DisplayTask received message: ");
-        Serial.println(receivedMessage.topic);
-        xSemaphoreGive(serialMutex);
-      }
-
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      // String topic_str_display = receivedMessage.topic.substring(0, 15);
-      lcd.print(receivedMessage.topic);
-      vTaskDelay(pdMS_TO_TICKS(10));
-      // String payload_str_display = receivedMessage.payload.substring(0, 15);
-      lcd.setCursor(0, 1);
-
-      lcd.print(receivedMessage.payload);
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    vTaskDelay(pdMS_TO_TICKS(1));  // must use for clear WDT
-  }
-}
-
 // Tasks 1
-void MqttTask(void *pvParameters) {
+void MqttHandleTask(void *pvParameters) {
   MyMessage messageToSend;
 
   Serial.println();
@@ -182,27 +125,106 @@ void MqttTask(void *pvParameters) {
   }
 }
 
+// Function in task 1
+void callback(char *topic, byte *payload, unsigned int length) {
+  MyMessage messageToSend;
+
+  payload[length] = '\0';
+
+  String topic_str = topic, payload_str = (char *)payload;
+  if (xSemaphoreTake(serialMutex, portMAX_DELAY)) {
+    Serial.println("[" + topic_str + "]: " + payload_str);
+    xSemaphoreGive(serialMutex);
+  }
+
+  messageToSend.data = random(100);
+  strcpy(messageToSend.topic, topic_str.c_str());
+  strcpy(messageToSend.payload, payload_str.c_str());
+  xQueueSend(xQueueCore0ToCore1, &messageToSend, portMAX_DELAY);
+}
+
+// Tasks 2
+void DisplayTask(void *pvParameters) {
+  MyMessage receivedMessage;
+
+  // initialize LCD
+  lcd.init();
+  // turn on LCD backlight
+  lcd.backlight();
+  // lcd.noBacklight();
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("IP address:");
+  vTaskDelay(pdMS_TO_TICKS(10));  // Delay for 5 seconds
+  lcd.setCursor(0, 1);
+  vTaskDelay(pdMS_TO_TICKS(10000));  // Delay for 5 seconds
+  lcd.print(WiFi.localIP());
+  vTaskDelay(pdMS_TO_TICKS(5000));  // Delay for 5 seconds
+
+  while (1) {
+    // Receive message from the queue
+    if (xQueueReceive(xQueueCore0ToCore1, &receivedMessage, portMAX_DELAY)) {
+      if (xSemaphoreTake(serialMutex, portMAX_DELAY)) {
+        Serial.print("DisplayTask received message: ");
+        Serial.println(receivedMessage.topic);
+        xSemaphoreGive(serialMutex);
+      }
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      // String topic_str_display = receivedMessage.topic.substring(0, 15);
+      lcd.print(receivedMessage.topic);
+      vTaskDelay(pdMS_TO_TICKS(10));
+      // String payload_str_display = receivedMessage.payload.substring(0, 15);
+      lcd.setCursor(0, 1);
+
+      lcd.print(receivedMessage.payload);
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));  // must use for clear WDT
+  }
+}
+
+
+// Task 3
+void MqttPublishTask(void *pvParameters) {
+  // sensor reading
+  while (1) {
+    if (xSemaphoreTake(mqttMutex, portMAX_DELAY)) {
+      mqtt.publish("outTopic", "hello world");
+      xSemaphoreGive(mqttMutex);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(60000));  // Delay for 60 seconds
+  }
+}
+
+// Initial
 void setup() {
   Serial.begin(115200);
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(LED_PIN, OUTPUT);
 
-  // Create a mutex for Serial
+  // Create a mutex for Serial, MQTT
   serialMutex = xSemaphoreCreateMutex();
+  mqttMutex = xSemaphoreCreateMutex();
 
   // Create message queue
   xQueueCore0ToCore1 = xQueueCreate(QUEUE_LENGTH, ITEM_SIZE);
 
   // Create the initial task
-  // xTaskCreate(MqttTask, "MqttTask", 20000, NULL, 1, NULL);
+  // xTaskCreate(MqttHandleTask, "MqttHandleTask", 20000, NULL, 1, NULL);
   // xTaskCreate(DisplayTask, "DisplayTask", 20000, NULL, 2, NULL);
-  xTaskCreatePinnedToCore(MqttTask, "MqttTask", 5000, NULL, 1, &Task1, 0);
+  xTaskCreatePinnedToCore(MqttHandleTask, "MqttHandleTask", 5000, NULL, 1, &Task1, 0);
   xTaskCreatePinnedToCore(DisplayTask, "DisplayTask", 5000, NULL, 1, &Task2, 1);
+  xTaskCreatePinnedToCore(MqttPublishTask, "MqttPublishTask", 5000, NULL, 2,  &Task3, 0);// lower priority
 
   // Start the scheduler
   vTaskStartScheduler();
 }
 
+// Main
 void loop() {
   // Code inside loop is not executed as tasks are scheduled by FreeRTOS
 }

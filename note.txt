@@ -1,0 +1,5 @@
+esp32_mqtt_lcd
+do monitor mqtt subscribe and display on lcd
+
+esp32_task_template
+do monitor mqtt subscribe/subscribe and display on lcd (using RTOS)
